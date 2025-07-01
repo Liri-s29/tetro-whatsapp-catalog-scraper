@@ -123,7 +123,19 @@ def import_products(conn, products_data):
     """
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
+    if not products_data:
+        print("✅ No products to import.")
+        return True
+        
     try:
+        # Pre-process products to extract metadata and set last_seen_id
+        current_scrape_job_id = products_data[0].get('scrape_job_id')
+        for p in products_data:
+            metadata = p.get('metadata', {})
+            p['photo_count'] = metadata.get('photo_count', 0)
+            p['scraped_at'] = metadata.get('scraped_at')
+            p['last_seen_scrape_job_id'] = current_scrape_job_id
+
         # 1. Separate products with and without links
         products_with_link = [p for p in products_data if p.get('product_link')]
         products_without_link = [p for p in products_data if not p.get('product_link')]
@@ -183,17 +195,17 @@ def import_products(conn, products_data):
                     title = data.title,
                     price = data.price,
                     description = data.description,
-                    images = data.images,
+                    images = data.images::jsonb,
                     is_out_of_stock = data.is_out_of_stock,
-                    metadata = data.metadata,
+                    metadata = data.metadata::jsonb,
                     photo_count = data.photo_count,
-                    scraped_at = data.scraped_at,
-                    last_seen_scrape_job_id = data.last_seen_scrape_job_id,
+                    scraped_at = data.scraped_at::timestamptz,
+                    last_seen_scrape_job_id = data.last_seen_scrape_job_id::uuid,
                     is_removed = data.is_removed,
-                    removed_at = data.removed_at,
-                    updated_at = data.updated_at,
-                    scrape_job_id = data.scrape_job_id,
-                    seller_id = data.seller_id
+                    removed_at = data.removed_at::timestamptz,
+                    updated_at = data.updated_at::timestamptz,
+                    scrape_job_id = data.scrape_job_id::uuid,
+                    seller_id = data.seller_id::uuid
                 FROM (VALUES %s) AS data (
                     id, title, price, description, images, is_out_of_stock,
                     metadata, photo_count, scraped_at, last_seen_scrape_job_id,
