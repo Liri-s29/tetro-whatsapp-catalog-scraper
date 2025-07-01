@@ -1,0 +1,7 @@
+selenium==4.16.0
+pandas==2.1.4
+rapidfuzz==3.6.1
+qrcode==7.4.2
+Pillow==10.1.0
+psycopg2-binary==2.9.9
+algoliasearch>=4.0,<5 
