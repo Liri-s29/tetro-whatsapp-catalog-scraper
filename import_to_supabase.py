@@ -227,19 +227,19 @@ def import_products(conn, products_data):
             # Mark products as removed if they're not in this scrape
             if seller_ids and current_product_links:
                 cursor.execute(
-                    "SELECT * FROM mark_missing_products_as_removed(%s, %s, %s)",
+                    "SELECT * FROM mark_missing_products_as_removed(%s::UUID[], %s::UUID, %s)",
                     (seller_ids, current_scrape_job_id, current_product_links)
                 )
                 removal_result = cursor.fetchone()
-                removed_count = removal_result[0] if removal_result else 0
+                removed_count = removal_result['products_marked_removed'] if removal_result else 0
                 
                 # Mark previously removed products as active if they reappeared
                 cursor.execute(
-                    "SELECT mark_reappeared_products_as_active(%s, %s)",
+                    "SELECT mark_reappeared_products_as_active(%s::UUID, %s)",
                     (current_scrape_job_id, current_product_links)
                 )
                 reactivated_result = cursor.fetchone()
-                reactivated_count = reactivated_result[0] if reactivated_result else 0
+                reactivated_count = reactivated_result['mark_reappeared_products_as_active'] if reactivated_result else 0
             else:
                 removed_count = 0
                 reactivated_count = 0
