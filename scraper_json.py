@@ -350,7 +350,9 @@ def setup_driver():
     chrome_options.add_argument("--disable-backgrounding-occluded-windows")
     chrome_options.add_argument("--disable-renderer-backgrounding")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--headless")  # Comment out for GUI mode
+    # chrome_options.add_argument("--headless")  # Comment out for GUI mode
+    # Open dev console on boot for debugging
+    chrome_options.add_argument("--auto-open-devtools-for-tabs")
     
     # Profile settings
     chrome_options.add_argument(f"--user-data-dir={os.path.abspath(CHROME_PROFILE_PATH)}")

@@ -1,1 +1,4 @@
 /chrome-profile-py/
+/_pycache/
+__pycache__/*
+__pycache__/scraper_json.cpython-311.pyc
