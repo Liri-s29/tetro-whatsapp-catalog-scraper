@@ -1,4 +1,4 @@
--- Ccreate the view with improved logic for weekly average
+-- Create the view with improved logic for weekly average and product lifecycle tracking
 CREATE OR REPLACE VIEW public.seller_metrics AS
 
 WITH 
@@ -13,11 +13,13 @@ weekly_activity AS (
         p.seller_id
 ),
 
--- Second, get lifetime unique product counts
+-- Second, get lifetime unique product counts, including active and removed stats
 lifetime_products AS (
     SELECT
         p.seller_id,
-        COUNT(DISTINCT p.id) AS lifetime_unique_products
+        COUNT(DISTINCT p.id) AS lifetime_unique_products,
+        COUNT(DISTINCT p.id) FILTER (WHERE p.is_removed = false OR p.is_removed IS NULL) AS active_unique_products,
+        COUNT(DISTINCT p.id) FILTER (WHERE p.is_removed = true) AS removed_unique_products
     FROM
         public.products p
     GROUP BY
@@ -44,6 +46,8 @@ SELECT
     s.is_active,
     
     COALESCE(lp.lifetime_unique_products, 0) AS lifetime_unique_products,
+    COALESCE(lp.active_unique_products, 0) AS active_unique_products,
+    COALESCE(lp.removed_unique_products, 0) AS removed_unique_products,
     
     -- Safely calculate the average using the count of active weeks
     CASE

@@ -11,6 +11,8 @@ import json
 from datetime import datetime, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+from supabase import create_client, Client
 
 # Database connection
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@127.0.0.1:54322/postgres')
@@ -83,7 +85,7 @@ def create_temp_csv(sellers):
     print(f"📄 Created temporary CSV with {len(sellers)} sellers: {temp_csv}")
     return temp_csv
 
-def run_scraper(csv_file):
+def run_scraper(csv_file, supabase_client: Client):
     """Run the scraper script"""
     print(f"\n🚀 Starting scraper with {csv_file}...")
     
@@ -117,7 +119,7 @@ def run_scraper(csv_file):
         
         # Scrape each seller
         for i, row in df.iterrows():
-            scraped_count = scrape_row(driver, row, i)
+            scraped_count = scrape_row(driver, row, i, supabase_client)
             total_items += scraped_count
             print(f'Scraped count for {row["name"]}: {scraped_count}')
         
@@ -235,7 +237,24 @@ def main():
     
     start_time = time.time()
     
+    # Load .env file
+    load_dotenv()
+    
     try:
+        # --- Initialize Supabase Client for the scraper ---
+        SUPABASE_URL = os.getenv("SUPABASE_URL")
+        SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            print("❌ Supabase URL or Key not found for the scraper. Please check your .env file.")
+            return False
+        
+        try:
+            supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+            print("✅ Successfully connected to Supabase for image uploads.")
+        except Exception as e:
+            print(f"❌ Failed to connect to Supabase for image uploads: {e}")
+            return False
+
         # Step 1: Load sellers from database
         print("\n📋 Step 1: Loading sellers from database...")
         sellers = load_active_sellers_from_db()
@@ -253,7 +272,7 @@ def main():
         
         # Step 3: Run scraper
         print("\n🤖 Step 3: Running scraper...")
-        scraper_success = run_scraper(temp_csv)
+        scraper_success = run_scraper(temp_csv, supabase)
         
         if not scraper_success:
             print("❌ Scraping failed")

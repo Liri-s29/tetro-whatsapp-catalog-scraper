@@ -4,4 +4,6 @@ rapidfuzz==3.6.1
 qrcode==7.4.2
 Pillow==10.1.0
 psycopg2-binary==2.9.9
-algoliasearch>=4.0,<5 
+algoliasearch>=4.0,<5
+supabase
+python-dotenv 

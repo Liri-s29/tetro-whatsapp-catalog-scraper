@@ -246,4 +246,26 @@ COMMENT ON FUNCTION mark_reappeared_products_as_active IS 'Reactivates products 
 COMMENT ON VIEW active_products IS 'Shows only products that are currently active (not removed)';
 COMMENT ON VIEW latest_products_per_seller IS 'Shows the most recent version of each product per seller';
 COMMENT ON VIEW scraping_stats IS 'Provides daily scraping statistics and performance metrics';
-COMMENT ON VIEW product_lifecycle_stats IS 'Analytics view showing product lifecycle statistics per seller'; 
+COMMENT ON VIEW product_lifecycle_stats IS 'Analytics view showing product lifecycle statistics per seller';
+
+-- Storage policies for product images
+-- Create the product-images bucket if it doesn't exist
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('product-images', 'product-images', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Allow public uploads to the product-images bucket
+CREATE POLICY "Allow public uploads to product-images" ON storage.objects
+FOR INSERT WITH CHECK (bucket_id = 'product-images');
+
+-- Allow public reads from the product-images bucket  
+CREATE POLICY "Allow public reads from product-images" ON storage.objects
+FOR SELECT USING (bucket_id = 'product-images');
+
+-- Allow public updates to the product-images bucket (for upsert operations)
+CREATE POLICY "Allow public updates to product-images" ON storage.objects
+FOR UPDATE USING (bucket_id = 'product-images');
+
+-- Allow public deletes from the product-images bucket (for cleanup)
+CREATE POLICY "Allow public deletes from product-images" ON storage.objects
+FOR DELETE USING (bucket_id = 'product-images'); 

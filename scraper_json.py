@@ -8,6 +8,7 @@ import os
 import time
 import json
 import pandas as pd
+import base64
 from datetime import datetime
 from datetime import timezone
 from selenium import webdriver
@@ -21,6 +22,13 @@ from selenium.webdriver.common.keys import Keys
 from rapidfuzz import fuzz
 import qrcode
 import uuid
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+# ---------------------------
+# Load environment variables
+# ---------------------------
+load_dotenv()
 
 # ---------------------------
 # Constants
@@ -29,6 +37,12 @@ CSV_FILE = "seller_catalog_links.csv"
 OUTPUT_FILE = "scraped_catalog_supabase.json"
 CHROME_PROFILE_PATH = "./chrome-profile-py"
 QR_SCREENSHOT_FILE = "whatsapp_qr.png"
+IMAGE_STORAGE_PATH = "product_images"
+
+# --- Supabase ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET = "product-images"
 
 # --- WhatsApp Selectors ---
 WHATSAPP_URL = "https://web.whatsapp.com/"
@@ -46,9 +60,7 @@ ALL_ITEMS_HEADER_SELECTOR = '.xcgk4ki'
 
 # Item Detail Page Selectors
 DETAIL_PAGE_CONTAINER = ".x162tt16"
-DETAIL_PAGE_TITLE = f"{DETAIL_PAGE_CONTAINER} > div:nth-child(1) > span" 
-DETAIL_PAGE_PRICE = f"{DETAIL_PAGE_CONTAINER} > div:nth-child(2) > span" 
-DETAIL_PAGE_DESC = f"{DETAIL_PAGE_CONTAINER} > div:nth-child(3) > div > span" 
+DETAIL_PAGE_IMAGE_SELECTOR = "._ak9n"
 LIST_ITEM_TITLE_SELECTOR = 'span[title]'
 
 IPHONE_KEYWORDS = [
@@ -112,7 +124,7 @@ def add_product(seller, product_data):
         "title": product_data["title"],
         "price": product_data["price"],
         "description": product_data["description"],
-        "images": [],  # Could be expanded to store image URLs
+        "images": [],  # Initialize with an empty list
         "product_link": product_data.get("product_link"),
         "is_out_of_stock": product_data.get("is_out_of_stock", False),
         "photo_count": product_data.get("photo_count", 0),
@@ -132,6 +144,95 @@ def add_product(seller, product_data):
     
     scrape_session["products"].append(product)
     return product
+
+def save_product_images(driver, product, supabase_client: Client):
+    """
+    Fetches product images from blob URLs, uploads them to Supabase Storage,
+    and returns their public URLs.
+    """
+    image_urls = []
+    try:
+        # Set a longer timeout for async script execution
+        driver.set_script_timeout(30)
+        
+        # Find all product images on the detail page
+        img_elements = driver.find_elements(By.CSS_SELECTOR, DETAIL_PAGE_IMAGE_SELECTOR)
+        
+        # print(f"   -> Found {len(img_elements)} images for product '{product['title']}'")
+
+        if not img_elements:
+            return []
+
+        for i, img in enumerate(img_elements):
+            blob_url = img.get_attribute('src')
+            if not blob_url or not blob_url.startswith('blob:'):
+                print(f"   -> Skipping image {i+1}: Invalid blob URL")
+                continue
+
+            # Simplified JavaScript to fetch blob and convert to base64
+            script = f"""
+            var callback = arguments[arguments.length - 1];
+            
+            fetch('{blob_url}')
+                .then(response => response.blob())
+                .then(blob => {{
+                    var reader = new FileReader();
+                    reader.onload = function() {{
+                        callback(reader.result);
+                    }};
+                    reader.onerror = function() {{
+                        callback(null);
+                    }};
+                    reader.readAsDataURL(blob);
+                }})
+                .catch(error => {{
+                    console.error('Error fetching blob:', error);
+                    callback(null);
+                }});
+            """
+
+            try:
+                # print(f"   -> Processing image {i+1}/{len(img_elements)}...")
+                
+                # Execute with longer timeout
+                data_url = driver.execute_async_script(script)
+                
+                if not data_url:
+                    print(f"   -> Failed to fetch image {i+1}")
+                    continue
+                    
+                header, encoded = data_url.split(",", 1)
+                image_data = base64.b64decode(encoded)
+                
+                # Define a unique path in Supabase Storage
+                image_filename = f"{i + 1}.png"
+                storage_path = f"{product['seller_id']}/{product['id']}/{image_filename}"
+                
+                # print(f"   -> Uploading to Supabase: {storage_path}")
+                
+                # Upload to Supabase
+                supabase_client.storage.from_(SUPABASE_BUCKET).upload(
+                    path=storage_path,
+                    file=image_data,
+                    file_options={"content-type": "image/png", "upsert": "true"}
+                )
+                
+                # Get public URL after successful upload
+                public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
+                image_urls.append(public_url)
+                # print(f"   -> Successfully uploaded image {i+1}: {public_url}")
+
+            except Exception as e:
+                print(f"   -> Error processing image {i+1}: {e}")
+                # Continue with next image instead of failing completely
+                continue
+        
+        print(f"   -> Total images uploaded: {len(image_urls)}")
+
+    except Exception as e:
+        print(f"   -> Error finding or uploading product images: {e}")
+    
+    return image_urls
 
 def navigate_to_all_items_page(driver, timeout=30):
     print('🔍 Looking for "All items" collection...')
@@ -209,7 +310,7 @@ def navigate_to_all_items_page(driver, timeout=30):
 
     return False
 
-def process_catalog_items(driver, seller_data, seller):
+def process_catalog_items(driver, seller_data, seller, supabase_client):
     print("Processing catalog items...")
     wait = WebDriverWait(driver, 5)
     index = 0
@@ -259,15 +360,37 @@ def process_catalog_items(driver, seller_data, seller):
 
             # Scrape from detail page
             detail_wait = WebDriverWait(driver, 10)
-            title = detail_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DETAIL_PAGE_TITLE))).text
-            price_text = detail_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DETAIL_PAGE_PRICE))).text
-            description = detail_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DETAIL_PAGE_DESC))).text
+            detail_container = detail_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, DETAIL_PAGE_CONTAINER)))
+
+            # Find all direct children that are not buttons and do not contain buttons.
+            text_elements = detail_container.find_elements(By.XPATH, "./div[not(.//button)]")
+
+            title = None
+            price = None
+            description = None
+            price_text = None  # To preserve original text for out-of-stock check
+
+            num_elements = len(text_elements)
+
+            if num_elements == 1:
+                title = text_elements[0].text
+            elif num_elements == 2:
+                title = text_elements[0].text
+                description = text_elements[1].text
+                price = "Not mentioned"
+            elif num_elements >= 3:
+                title = text_elements[0].text
+                price_text = text_elements[1].text
+                description = "\n".join([el.text for el in text_elements[2:]])
             
-            price = price_text.split(" ")[0]
-            is_out_of_stock = "out of stock" in price_text.lower()
+            # Only derive price from price_text if it hasn't been set (e.g., for 2 elements)
+            if price is None and price_text:
+                price = price_text.split(" ")[0]
+
+            is_out_of_stock = "out of stock" in price_text.lower() if price_text else False
             
             if is_out_of_stock:
-                print(f"Skipped '{title}': Out of stock.")
+                print(f"   -> Item '{title}' is out of stock.")
                 # Go back once from detail page
                 wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, BACK_BUTTON_SELECTOR))).click()
                 time.sleep(0.3)
@@ -287,13 +410,25 @@ def process_catalog_items(driver, seller_data, seller):
             try:
                 photo_container = detail_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, PHOTO_CONTAINER_SELECTOR)))
                 product_data["photo_count"] = len(photo_container.find_elements(By.XPATH, "./*"))
+                
+                # Download and save images while we're still on the detail page
+                # First add product to get an ID
+                temp_product = add_product(seller, product_data)
+                
+                # Download images while on detail page
+                image_urls = save_product_images(driver, temp_product, supabase_client)
+                temp_product['images'] = image_urls
+                
             except TimeoutException:
-                pass # No photos found
+                # No photos found, still add product but without images
+                temp_product = add_product(seller, product_data)
+                temp_product['images'] = []
 
             try:
                 detail_wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, LINK_ICON_SELECTOR))).click()
                 link_elem = detail_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, LINK_HREF_SELECTOR)))
                 product_data["product_link"] = link_elem.get_attribute("href")
+                temp_product["product_link"] = product_data["product_link"]
                 # Go back from link page
                 wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, BACK_BUTTON_SELECTOR))).click()
                 time.sleep(0.3)
@@ -304,8 +439,6 @@ def process_catalog_items(driver, seller_data, seller):
             wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, BACK_BUTTON_SELECTOR))).click()
             time.sleep(0.3)
 
-            # Add product to global data structure
-            add_product(seller, product_data)
             items_scraped += 1
             print(f"[{index + 1}] Scraped: {title} | Price: {price}")
             # --- End of single item processing ---
@@ -505,7 +638,7 @@ def handle_whatsapp_login(driver):
         print(f"❌ Authentication failed: {error}")
         return False
 
-def scrape_row(driver, row, index):
+def scrape_row(driver, row, index, supabase_client):
     start_time = time.time()
     seller_name = row["name"]
 
@@ -537,7 +670,7 @@ def scrape_row(driver, row, index):
         if not navigated:
             print(f"⚠️ Could not navigate to 'All items' page for {seller_name}. Attempting to scrape current page.")
 
-        count = process_catalog_items(driver, seller_data, seller)
+        count = process_catalog_items(driver, seller_data, seller, supabase_client)
 
         if count > 0:
             scrape_session["scrape_job"]["job_metadata"]["sellers_processed"].append(seller_name)
@@ -563,39 +696,67 @@ if __name__ == "__main__":
 
     total_start_time = time.time()
 
-    df = pd.read_csv(CSV_FILE)
+    # --- Initialize Supabase Client ---
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("❌ Supabase URL or Key not found. Please check your .env file.")
+        exit(1)
     
-    driver = setup_driver()
-    if not driver:
-        print("❌ Failed to setup selenium driver. Exiting.")
+    try:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Successfully connected to Supabase.")
+    except Exception as e:
+        print(f"❌ Failed to connect to Supabase: {e}")
         exit(1)
 
-    if not handle_whatsapp_login(driver):
-        print("❌ WhatsApp login failed. Exiting.")
-        driver.quit()
-        exit(1)
+    # --- Load Seller Data ---
+    try:
+        df = pd.read_csv(CSV_FILE)
         
-    print("\n\n--- Starting Catalog Scraping ---\n")
+        driver = setup_driver()
+        if not driver:
+            print("❌ Failed to setup selenium driver. Exiting.")
+            exit(1)
 
-    total_items = 0
-    for i, row in df.iterrows():
-        scraped_count = scrape_row(driver, row, i)
-        total_items += scraped_count
-        print('Scraped count: ', scraped_count)
+        if not handle_whatsapp_login(driver):
+            print("❌ WhatsApp login failed. Exiting.")
+            driver.quit()
+            exit(1)
+        
+        print("\n\n--- Starting Catalog Scraping ---\n")
 
-    driver.quit()
+        total_items = 0
+        for i, row in df.iterrows():
+            scraped_count = scrape_row(driver, row, i, supabase)
+            total_items += scraped_count
+            print('Scraped count: ', scraped_count)
 
-    # Finalize scrape job
-    total_elapsed_time = time.time() - total_start_time
-    scrape_session["scrape_job"]["status"] = "completed"
-    scrape_session["scrape_job"]["completed_at"] = datetime.now(timezone.utc).isoformat()
-    scrape_session["scrape_job"]["total_items"] = total_items
-    scrape_session["scrape_job"]["total_sellers"] = len(scrape_session["sellers"])
-    scrape_session["scrape_job"]["job_metadata"]["total_time_seconds"] = round(total_elapsed_time, 2)
+        driver.quit()
 
-    # Save to JSON file
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(scrape_session, f, indent=2, ensure_ascii=False)
+        # Finalize scrape job
+        total_elapsed_time = time.time() - total_start_time
+        scrape_session["scrape_job"]["status"] = "completed"
+        scrape_session["scrape_job"]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        scrape_session["scrape_job"]["total_items"] = total_items
+        scrape_session["scrape_job"]["total_sellers"] = len(scrape_session["sellers"])
+        scrape_session["scrape_job"]["job_metadata"]["total_time_seconds"] = round(total_elapsed_time, 2)
+
+        # Save to JSON file
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(scrape_session, f, indent=2, ensure_ascii=False)
+
+        print(f"\n🕒 Total scraping time: {total_elapsed_time:.2f} seconds")
+        print(f"✅ Finished. Total items: {total_items}, Sellers: {len(scrape_session['sellers'])}")
+        print(f"📄 Supabase-compatible JSON saved to {OUTPUT_FILE}")
+        
+        # Print summary for easy import
+        print(f"\n📊 Summary for Supabase import:")
+        print(f"   - Scrape Job ID: {scrape_session['scrape_job']['id']}")
+        print(f"   - Sellers: {len(scrape_session['sellers'])}")
+        print(f"   - Products: {len(scrape_session['products'])}")
+        print(f"   - Status: {scrape_session['scrape_job']['status']}")
+    except Exception as e:
+        print(f"\n❌ An error occurred while scraping: {e}")
+        exit(1)
 
     print(f"\n🕒 Total scraping time: {total_elapsed_time:.2f} seconds")
     print(f"✅ Finished. Total items: {total_items}, Sellers: {len(scrape_session['sellers'])}")
