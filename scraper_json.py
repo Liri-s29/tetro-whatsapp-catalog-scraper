@@ -101,9 +101,25 @@ def url_to_id(url):
 def sanitize_for_storage(text):
     """Sanitize text for use in file paths"""
     import re
+    if not text:
+        return "unknown"
+    
     # Remove or replace characters that might cause issues in file paths
-    sanitized = re.sub(r'[^\w\-_.]', '_', text)
-    return sanitized[:50]  # Limit length
+    # Keep only alphanumeric, hyphens, underscores
+    sanitized = re.sub(r'[^\w\-]', '_', text.strip())
+    
+    # Remove multiple consecutive underscores
+    sanitized = re.sub(r'_+', '_', sanitized)
+    
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip('_')
+    
+    # Ensure it's not empty after sanitization
+    if not sanitized:
+        sanitized = "item"
+    
+    # Limit length to avoid filesystem issues
+    return sanitized[:50]
 
 def is_iphone_related(texts, threshold=70):
     combined = " ".join(text.lower() for text in texts if text)
@@ -216,8 +232,13 @@ def save_product_images(driver, product, supabase_client: Client):
         if not img_elements:
             return []
 
-        # Base storage path for this product
-        base_path = f"{product['seller_id']}/{product['id']}"
+        # Create human-readable directory structure: sellername-id/productname-id/
+        seller_name = sanitize_for_storage(product.get('metadata', {}).get('seller_name', 'unknown_seller'))
+        product_title = sanitize_for_storage(product.get('title', 'unknown_product'))
+        
+        seller_dir = f"{seller_name}-{product['seller_id']}"
+        product_dir = f"{product_title}-{product['id']}"
+        base_path = f"{seller_dir}/{product_dir}"
         
         # Check if images already exist in storage
         try:
@@ -226,7 +247,7 @@ def save_product_images(driver, product, supabase_client: Client):
                 print(f"   -> Found {len(existing_files)} existing images, returning URLs")
                 # Return URLs for existing images
                 for file_obj in existing_files:
-                    if file_obj['name'].endswith('.png'):
+                    if file_obj['name'].isdigit() or file_obj['name'].endswith('.png'):
                         storage_path = f"{base_path}/{file_obj['name']}"
                         public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
                         image_urls.append(public_url)
@@ -241,10 +262,9 @@ def save_product_images(driver, product, supabase_client: Client):
                 print(f"   -> Skipping image {i+1}: Invalid blob URL")
                 continue
 
-            # Create a hash of the blob URL to create stable filenames
-            blob_hash = hashlib.md5(blob_url.encode('utf-8')).hexdigest()[:8]
-            image_filename = f"img_{i+1}_{blob_hash}.png"
-            storage_path = f"{base_path}/{image_filename}"
+            # Use serial number as filename (1, 2, 3, etc.)
+            sno = str(i + 1)
+            storage_path = f"{base_path}/{sno}"
 
             # Simplified JavaScript to fetch blob and convert to base64
             script = f"""
