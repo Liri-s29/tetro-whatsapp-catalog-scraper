@@ -24,6 +24,7 @@ import qrcode
 import uuid
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import hashlib
 
 # ---------------------------
 # Load environment variables
@@ -91,17 +92,30 @@ scrape_session = {
 # ---------------------------
 # Helper Functions
 # ---------------------------
+def url_to_id(url):
+    """Convert a URL to a stable ID by hashing it"""
+    if not url:
+        return str(uuid.uuid4())  # Fallback to UUID if no URL
+    return hashlib.md5(url.encode('utf-8')).hexdigest()
+
+def sanitize_for_storage(text):
+    """Sanitize text for use in file paths"""
+    import re
+    # Remove or replace characters that might cause issues in file paths
+    sanitized = re.sub(r'[^\w\-_.]', '_', text)
+    return sanitized[:50]  # Limit length
+
 def is_iphone_related(texts, threshold=70):
     combined = " ".join(text.lower() for text in texts if text)
     return any(fuzz.partial_ratio(keyword, combined) >= threshold for keyword in IPHONE_KEYWORDS)
 
 def get_or_create_seller(name, city, contact, catalogue_url):
-    """Get or create seller in the global data structure"""
-    seller_key = f"{name}_{city}".replace(" ", "_").lower()
+    """Get or create seller in the global data structure using catalog URL as unique identifier"""
+    seller_id = url_to_id(catalogue_url)  # Use catalog URL as stable ID
     
-    if seller_key not in scrape_session["sellers"]:
-        scrape_session["sellers"][seller_key] = {
-            "id": str(uuid.uuid4()),
+    if seller_id not in scrape_session["sellers"]:
+        scrape_session["sellers"][seller_id] = {
+            "id": seller_id,
             "name": name,
             "city": city,
             "contact": contact,
@@ -111,46 +125,85 @@ def get_or_create_seller(name, city, contact, catalogue_url):
             "is_active": True
         }
     
-    return scrape_session["sellers"][seller_key]
+    return scrape_session["sellers"][seller_id]
 
 def add_product(seller, product_data):
-    """Add a product to the global data structure"""
+    """Add a product to the global data structure using product URL as unique identifier"""
     scraped_time = datetime.now(timezone.utc).isoformat()
     
-    product = {
-        "id": str(uuid.uuid4()),
-        "seller_id": seller["id"],
-        "scrape_job_id": scrape_session["scrape_job"]["id"],
-        "title": product_data["title"],
-        "price": product_data["price"],
-        "description": product_data["description"],
-        "images": [],  # Initialize with an empty list
-        "product_link": product_data.get("product_link"),
-        "is_out_of_stock": product_data.get("is_out_of_stock", False),
-        "photo_count": product_data.get("photo_count", 0),
-        "scraped_at": scraped_time,
-        "last_seen_scrape_job_id": scrape_session["scrape_job"]["id"],
-        "is_removed": False,
-        "removed_at": None,
-        "metadata": {
-            "catalogue_url": product_data["catalogue_url"],
-            "seller_name": product_data["seller_name"],
-            "seller_city": product_data["seller_city"],
-            "seller_contact": product_data["seller_contact"]
-        },
-        "created_at": scraped_time,
-        "updated_at": scraped_time
-    }
+    # Use product URL as unique identifier, fallback to title+seller if no URL
+    product_url = product_data.get("product_link")
+    if product_url:
+        product_id = url_to_id(product_url)
+    else:
+        # Fallback: create ID from title + seller catalog URL for products without links
+        fallback_key = f"{product_data['title']}_{seller['catalogue_url']}"
+        product_id = url_to_id(fallback_key)
     
-    scrape_session["products"].append(product)
-    return product
+    # Check if product already exists
+    existing_product = None
+    for product in scrape_session["products"]:
+        if product["id"] == product_id:
+            existing_product = product
+            break
+    
+    if existing_product:
+        # Update existing product
+        existing_product["last_seen_scrape_job_id"] = scrape_session["scrape_job"]["id"]
+        existing_product["updated_at"] = scraped_time
+        existing_product["is_removed"] = False
+        existing_product["removed_at"] = None
+        # Update other fields that might have changed
+        existing_product["title"] = product_data["title"]
+        existing_product["price"] = product_data["price"]
+        existing_product["description"] = product_data["description"]
+        existing_product["is_out_of_stock"] = product_data.get("is_out_of_stock", False)
+        existing_product["photo_count"] = product_data.get("photo_count", 0)
+        if product_data.get("product_link"):
+            existing_product["product_link"] = product_data["product_link"]
+        return existing_product
+    else:
+        # Create new product
+        product = {
+            "id": product_id,
+            "seller_id": seller["id"],
+            "scrape_job_id": scrape_session["scrape_job"]["id"],
+            "title": product_data["title"],
+            "price": product_data["price"],
+            "description": product_data["description"],
+            "images": [],  # Initialize with an empty list
+            "product_link": product_data.get("product_link"),
+            "is_out_of_stock": product_data.get("is_out_of_stock", False),
+            "photo_count": product_data.get("photo_count", 0),
+            "scraped_at": scraped_time,
+            "last_seen_scrape_job_id": scrape_session["scrape_job"]["id"],
+            "is_removed": False,
+            "removed_at": None,
+            "metadata": {
+                "catalogue_url": product_data["catalogue_url"],
+                "seller_name": product_data["seller_name"],
+                "seller_city": product_data["seller_city"],
+                "seller_contact": product_data["seller_contact"]
+            },
+            "created_at": scraped_time,
+            "updated_at": scraped_time
+        }
+        
+        scrape_session["products"].append(product)
+        return product
 
 def save_product_images(driver, product, supabase_client: Client):
     """
     Fetches product images from blob URLs, uploads them to Supabase Storage,
-    and returns their public URLs.
+    and returns their public URLs. Avoids duplicate uploads by checking if images exist.
     """
     image_urls = []
+    
+    # First, check if product already has images stored
+    if product.get('images') and len(product['images']) > 0:
+        print(f"   -> Product already has {len(product['images'])} images stored, skipping upload")
+        return product['images']
+    
     try:
         # Set a longer timeout for async script execution
         driver.set_script_timeout(30)
@@ -163,11 +216,35 @@ def save_product_images(driver, product, supabase_client: Client):
         if not img_elements:
             return []
 
+        # Base storage path for this product
+        base_path = f"{product['seller_id']}/{product['id']}"
+        
+        # Check if images already exist in storage
+        try:
+            existing_files = supabase_client.storage.from_(SUPABASE_BUCKET).list(base_path)
+            if existing_files and len(existing_files) > 0:
+                print(f"   -> Found {len(existing_files)} existing images, returning URLs")
+                # Return URLs for existing images
+                for file_obj in existing_files:
+                    if file_obj['name'].endswith('.png'):
+                        storage_path = f"{base_path}/{file_obj['name']}"
+                        public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
+                        image_urls.append(public_url)
+                return sorted(image_urls)  # Sort to maintain consistent order
+        except Exception as e:
+            # If listing fails, proceed with upload (storage path might not exist yet)
+            print(f"   -> Could not check existing images: {e}")
+
         for i, img in enumerate(img_elements):
             blob_url = img.get_attribute('src')
             if not blob_url or not blob_url.startswith('blob:'):
                 print(f"   -> Skipping image {i+1}: Invalid blob URL")
                 continue
+
+            # Create a hash of the blob URL to create stable filenames
+            blob_hash = hashlib.md5(blob_url.encode('utf-8')).hexdigest()[:8]
+            image_filename = f"img_{i+1}_{blob_hash}.png"
+            storage_path = f"{base_path}/{image_filename}"
 
             # Simplified JavaScript to fetch blob and convert to base64
             script = f"""
@@ -203,10 +280,6 @@ def save_product_images(driver, product, supabase_client: Client):
                     
                 header, encoded = data_url.split(",", 1)
                 image_data = base64.b64decode(encoded)
-                
-                # Define a unique path in Supabase Storage
-                image_filename = f"{i + 1}.png"
-                storage_path = f"{product['seller_id']}/{product['id']}/{image_filename}"
                 
                 # print(f"   -> Uploading to Supabase: {storage_path}")
                 
