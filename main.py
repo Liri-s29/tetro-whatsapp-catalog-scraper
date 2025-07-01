@@ -8,7 +8,6 @@ import os
 import sys
 import time
 import json
-import subprocess
 from datetime import datetime, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -200,23 +199,13 @@ def run_algolia_indexing(json_file):
     
     try:
         # Import and run Algolia indexer
-        from algolia_indexer import index_to_algolia, get_index_stats
+        from algolia_indexer import index_to_algolia
         
         # Index to Algolia
         success = index_to_algolia(json_file, clear_index=True)
         
         if success:
             print(f"✅ Algolia indexing completed!")
-            
-            # Show Algolia stats
-            stats = get_index_stats()
-            if stats:
-                print(f"📊 Algolia Index Statistics:")
-                print(f"   - Total products indexed: {stats['total_products']}")
-                print(f"   - Sellers: {stats['sellers']}")
-                print(f"   - In stock: {stats['in_stock']}")
-                print(f"   - Out of stock: {stats['out_of_stock']}")
-            
             return True
         else:
             print(f"❌ Algolia indexing failed")
@@ -224,7 +213,7 @@ def run_algolia_indexing(json_file):
             
     except ImportError as e:
         print(f"⚠️ Algolia indexing skipped: Missing dependency ({e})")
-        print(f"💡 Install with: pip install algoliasearch>=3.0.0")
+        print(f"💡 Install with: pip install 'algoliasearch>=4.0.0'")
         return True  # Don't fail the whole pipeline
     except Exception as e:
         print(f"❌ Algolia indexing error: {e}")
